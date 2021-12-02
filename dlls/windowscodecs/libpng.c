@@ -712,6 +712,10 @@ static HRESULT CDECL png_encoder_create_frame(struct encoder *encoder, const str
         png_set_filter(This->png_ptr, 0, png_filter_map[encoder_frame->filter]);
     }
 
+    /* This seems to match native behavior somewhat. */
+    png_set_compression_level(This->png_ptr, 4);
+    png_set_compression_buffer_size(This->png_ptr, (1 << 16) - 12);
+
     return S_OK;
 }
 
