@@ -412,45 +412,6 @@ static GpStatus get_clip_hrgn(GpGraphics *graphics, HRGN *hrgn)
     return stat;
 }
 
-/* Draw ARGB data to the given graphics object */
-static GpStatus alpha_blend_bmp_pixels(GpGraphics *graphics, INT dst_x, INT dst_y,
-    const BYTE *src, INT src_width, INT src_height, INT src_stride, const PixelFormat fmt)
-{
-    GpBitmap *dst_bitmap = (GpBitmap*)graphics->image;
-    INT x, y;
-    CompositingMode comp_mode = graphics->compmode;
-
-    for (y=0; y<src_height; y++)
-    {
-        for (x=0; x<src_width; x++)
-        {
-            ARGB dst_color, src_color;
-            src_color = ((ARGB*)(src + src_stride * y))[x];
-
-            if (comp_mode == CompositingModeSourceCopy)
-            {
-                if (!(src_color & 0xff000000))
-                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, 0);
-                else
-                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, src_color);
-            }
-            else
-            {
-                if (!(src_color & 0xff000000))
-                    continue;
-
-                GdipBitmapGetPixel(dst_bitmap, x+dst_x, y+dst_y, &dst_color);
-                if (fmt & PixelFormatPAlpha)
-                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, color_over_fgpremult(dst_color, src_color));
-                else
-                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, color_over(dst_color, src_color));
-            }
-        }
-    }
-
-    return Ok;
-}
-
 static GpStatus alpha_blend_hdc_pixels(GpGraphics *graphics, INT dst_x, INT dst_y,
     const BYTE *src, INT src_width, INT src_height, INT src_stride, PixelFormat fmt)
 {
@@ -512,6 +473,9 @@ static GpStatus alpha_blend_pixels_hrgn(GpGraphics *graphics, INT dst_x, INT dst
         RECT *rects;
         HRGN hrgn, visible_rgn;
 
+        GpBitmap *bitmap = (GpBitmap*)graphics->image;
+        CompositingMode comp_mode = graphics->compmode;
+
         hrgn = CreateRectRgn(dst_x, dst_y, dst_x + src_width, dst_y + src_height);
         if (!hrgn)
             return OutOfMemory;
@@ -547,10 +511,10 @@ static GpStatus alpha_blend_pixels_hrgn(GpGraphics *graphics, INT dst_x, INT dst
 
         for (i=0; stat == Ok && i<rgndata->rdh.nCount; i++)
         {
-            stat = alpha_blend_bmp_pixels(graphics, rects[i].left, rects[i].top,
+            alpha_blend_bmp_pixels(bitmap, rects[i].left, rects[i].top,
                 &src[(rects[i].left - dst_x) * 4 + (rects[i].top - dst_y) * src_stride],
                 rects[i].right - rects[i].left, rects[i].bottom - rects[i].top,
-                src_stride, fmt);
+                src_stride, fmt, comp_mode);
         }
 
         free(rgndata);

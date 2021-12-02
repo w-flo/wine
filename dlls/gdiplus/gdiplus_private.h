@@ -212,6 +212,10 @@ extern const char *debugstr_matrix(const GpMatrix* matrix);
 extern void convert_32bppARGB_to_32bppPARGB(UINT width, UINT height,
     BYTE *dst_bits, INT dst_stride, const BYTE *src_bits, INT src_stride);
 
+extern void alpha_blend_bmp_pixels(GpBitmap *dst_bitmap, INT dst_x, INT dst_y,
+    const BYTE *src, INT src_width, INT src_height, INT src_stride, const PixelFormat fmt,
+    CompositingMode comp_mode);
+
 extern GpStatus convert_pixels(INT width, INT height,
     INT dst_stride, BYTE *dst_bits, PixelFormat dst_format, ColorPalette *dst_palette,
     INT src_stride, const BYTE *src_bits, PixelFormat src_format, ColorPalette *src_palette);

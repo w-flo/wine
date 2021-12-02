@@ -589,6 +589,160 @@ GpStatus WINGDIPAPI GdipBitmapSetPixel(GpBitmap* bitmap, INT x, INT y,
     return Ok;
 }
 
+/* Draw ARGB data to the given bitmap */
+void alpha_blend_bmp_pixels(GpBitmap *dst_bitmap, INT dst_x, INT dst_y,
+    const BYTE *src, INT src_width, INT src_height, INT src_stride, const PixelFormat fmt,
+    CompositingMode comp_mode)
+{
+    INT x, y;
+    ARGB src_color, dst_color, src_alpha, *src_ptr;
+    BYTE a, r, g, b;
+    BYTE *dst_row;
+    INT bytespp = PIXELFORMATBPP(fmt) / 8;
+
+    if (dst_x < 0)
+    {
+        /* crop left side of src area that would fall into negative dst_x */
+        /* this replicates previous behavior, out of bounds dst pixels are ignored */
+        src += bytespp * -dst_x;
+        src_width -= -dst_x;
+        dst_x = 0;
+    }
+    if (dst_y < 0)
+    {
+        /* same for y direction */
+        src += bytespp * src_stride * -dst_y;
+        src_height -= -dst_y;
+        dst_y = 0;
+    }
+
+    /* also crop at the positive coordinates of src area */
+    if (dst_x + src_width > dst_bitmap->width)
+        src_width = dst_bitmap->width - dst_x;
+    if (dst_y + src_height > dst_bitmap->height)
+        src_height = dst_bitmap->height - dst_y;
+
+#define copy_source_pixels(setpixel_func) { \
+    for (y = 0; y<src_height; y++) \
+    { \
+        dst_row = dst_bitmap->bits + dst_bitmap->stride * (y + dst_y); \
+        src_ptr = (ARGB*)(src + src_stride * y); \
+        for (x = 0; x<src_width; x++, src_ptr++) \
+        { \
+            src_color = *src_ptr; \
+            if (!(src_color & 0xff000000)) \
+                setpixel_func(0,0,0,0, dst_row, x + dst_x); \
+            else \
+            { \
+                a = src_color>>24; \
+                r = src_color>>16; \
+                g = src_color>>8; \
+                b = src_color; \
+                setpixel_func(r,g,b,a, dst_row, x + dst_x); \
+            } \
+        } \
+    } \
+}
+
+#define blend_source_pixels(getpixel_func, setpixel_func, color_over_func) { \
+    for (y = 0; y<src_height; y++) \
+    { \
+        dst_row = dst_bitmap->bits + dst_bitmap->stride * (y + dst_y); \
+        src_ptr = (ARGB*)(src + src_stride * y); \
+        for (x = 0; x<src_width; x++, src_ptr++) \
+        { \
+            src_color = *src_ptr; \
+            src_alpha = src_color & 0xff000000; \
+            if (src_alpha == 0) \
+                continue; \
+            if (src_alpha == 0xff000000) \
+                dst_color = src_color; \
+            else \
+            { \
+                getpixel_func(&r,&g,&b,&a, dst_row, x + dst_x); \
+                dst_color = color_over_func(a<<24|r<<16|g<<8|b, src_color); \
+            } \
+            \
+            a = dst_color>>24; \
+            r = dst_color>>16; \
+            g = dst_color>>8; \
+            b = dst_color; \
+            setpixel_func(r,g,b,a, dst_row, x + dst_x); \
+        } \
+    } \
+}
+
+#define process_pixels_and_return(getpixel_func, setpixel_func) { \
+    if (comp_mode == CompositingModeSourceCopy) \
+        copy_source_pixels(setpixel_func) \
+    else if (fmt & PixelFormatPAlpha) \
+        blend_source_pixels(getpixel_func, setpixel_func, color_over_fgpremult) \
+    else \
+        blend_source_pixels(getpixel_func, setpixel_func, color_over) \
+    return; \
+}
+
+    switch (dst_bitmap->format)
+    {
+        case PixelFormat16bppGrayScale:
+            process_pixels_and_return(getpixel_16bppGrayScale, setpixel_16bppGrayScale);
+        case PixelFormat16bppRGB555:
+            process_pixels_and_return(getpixel_16bppRGB555, setpixel_16bppRGB555);
+        case PixelFormat16bppRGB565:
+            process_pixels_and_return(getpixel_16bppRGB565, setpixel_16bppRGB565);
+        case PixelFormat16bppARGB1555:
+            process_pixels_and_return(getpixel_16bppARGB1555, setpixel_16bppARGB1555);
+        case PixelFormat24bppRGB:
+            process_pixels_and_return(getpixel_24bppRGB, setpixel_24bppRGB);
+        case PixelFormat32bppRGB:
+            process_pixels_and_return(getpixel_32bppRGB, setpixel_32bppRGB);
+        case PixelFormat32bppARGB:
+            process_pixels_and_return(getpixel_32bppARGB, setpixel_32bppARGB);
+        case PixelFormat32bppPARGB:
+            process_pixels_and_return(getpixel_32bppPARGB, setpixel_32bppPARGB);
+        case PixelFormat48bppRGB:
+            process_pixels_and_return(getpixel_48bppRGB, setpixel_48bppRGB);
+        case PixelFormat64bppARGB:
+            process_pixels_and_return(getpixel_64bppARGB, setpixel_64bppARGB);
+        case PixelFormat64bppPARGB:
+            process_pixels_and_return(getpixel_64bppPARGB, setpixel_64bppPARGB);
+        default:
+            /* use less efficient generic code below */
+            break;
+    }
+#undef copy_source_pixels
+#undef blend_source_pixels
+#undef process_pixels_and_return
+
+    for (y=0; y<src_height; y++)
+    {
+        for (x=0; x<src_width; x++)
+        {
+            ARGB dst_color, src_color;
+            src_color = ((ARGB*)(src + src_stride * y))[x];
+
+            if (comp_mode == CompositingModeSourceCopy)
+            {
+                if (!(src_color & 0xff000000))
+                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, 0);
+                else
+                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, src_color);
+            }
+            else
+            {
+                if (!(src_color & 0xff000000))
+                    continue;
+
+                GdipBitmapGetPixel(dst_bitmap, x+dst_x, y+dst_y, &dst_color);
+                if (fmt & PixelFormatPAlpha)
+                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, color_over_fgpremult(dst_color, src_color));
+                else
+                    GdipBitmapSetPixel(dst_bitmap, x+dst_x, y+dst_y, color_over(dst_color, src_color));
+            }
+        }
+    }
+}
+
 GpStatus convert_pixels(INT width, INT height,
     INT dst_stride, BYTE *dst_bits, PixelFormat dst_format,
     ColorPalette *dst_palette,
