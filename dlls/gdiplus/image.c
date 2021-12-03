@@ -38,6 +38,8 @@
 #include "gdiplus_private.h"
 #include "wine/debug.h"
 
+#include <windows.h>
+
 WINE_DEFAULT_DEBUG_CHANNEL(gdiplus);
 
 HRESULT WINAPI WICCreateImagingFactory_Proxy(UINT, IWICImagingFactory**);
@@ -1796,7 +1798,15 @@ GpStatus WINGDIPAPI GdipCreateBitmapFromScan0(INT width, INT height, INT stride,
     REAL xres, yres;
     GpStatus stat;
 
-    TRACE("%d %d %d 0x%x %p %p\n", width, height, stride, format, scan0, bitmap);
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER t1, t2;
+    double elapsedTime;
+
+    QueryPerformanceFrequency(&frequency);
+    /* Start timer */
+    QueryPerformanceCounter(&t1);
+
+    ERR("%d %d %d 0x%x %p %p\n", width, height, stride, format, scan0, bitmap);
 
     if (!bitmap) return InvalidParameter;
 
@@ -1924,6 +1934,11 @@ GpStatus WINGDIPAPI GdipCreateBitmapFromScan0(INT width, INT height, INT stride,
     }
 
     TRACE("<-- %p\n", *bitmap);
+
+    /* Stop timer */
+    QueryPerformanceCounter(&t2);
+    elapsedTime = (t2.QuadPart - t1.QuadPart) * 1000.0 / frequency.QuadPart;
+    ERR("Done! %.5f ms\n", elapsedTime);
 
     return Ok;
 }
@@ -4769,6 +4784,19 @@ GpStatus WINGDIPAPI GdipSaveImageToStream(GpImage *image, IStream* stream,
     encode_image_func encode_image;
     int i;
 
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER t1, t2;
+    static LARGE_INTEGER last_call;
+    double elapsedTime;
+
+    QueryPerformanceFrequency(&frequency);
+    /* Start timer */
+    QueryPerformanceCounter(&t1);
+
+    elapsedTime = (t1.QuadPart - last_call.QuadPart) * 1000.0 / frequency.QuadPart;
+    ERR("Time since last call: %.5f ms\n", elapsedTime);
+    last_call = t1;
+
     TRACE("%p, %p, %s, %p\n", image, stream, wine_dbgstr_guid(clsid), params);
 
     if(!image || !stream)
@@ -4785,6 +4813,11 @@ GpStatus WINGDIPAPI GdipSaveImageToStream(GpImage *image, IStream* stream,
         return UnknownImageFormat;
 
     stat = encode_image(image, stream, params);
+
+    /* Stop timer */
+    QueryPerformanceCounter(&t2);
+    elapsedTime = (t2.QuadPart - t1.QuadPart) * 1000.0 / frequency.QuadPart;
+    ERR("Encoded image! %.5f ms\n", elapsedTime);
 
     return stat;
 }

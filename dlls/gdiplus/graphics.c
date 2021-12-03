@@ -39,6 +39,8 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 
+#include <windows.h>
+
 WINE_DEFAULT_DEBUG_CHANNEL(gdiplus);
 
 /* looks-right constants */
@@ -3063,6 +3065,14 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
     POINT pti[4];
     GpStatus stat;
 
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER t1, t2;
+    double elapsedTime;
+
+    QueryPerformanceFrequency(&frequency);
+    /* Start timer */
+    QueryPerformanceCounter(&t1);
+
     TRACE("(%p, %p, %p, %d, %f, %f, %f, %f, %d, %p, %p, %p)\n", graphics, image, points,
           count, srcx, srcy, srcwidth, srcheight, srcUnit, imageAttributes, callback,
           callbackData);
@@ -3183,7 +3193,7 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
             if (graphics_bounds.X + graphics_bounds.Width < dst_area.right) dst_area.right = ceilf(graphics_bounds.X + graphics_bounds.Width);
             if (graphics_bounds.Y + graphics_bounds.Height < dst_area.bottom) dst_area.bottom = ceilf(graphics_bounds.Y + graphics_bounds.Height);
 
-            TRACE("dst_area: %s\n", wine_dbgstr_rect(&dst_area));
+            ERR("dst_area: %s\n", wine_dbgstr_rect(&dst_area));
 
             if (IsRectEmpty(&dst_area)) return Ok;
 
@@ -3302,6 +3312,11 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
             heap_free(src_data);
 
             heap_free(dst_dyn_data);
+
+            /* Stop timer */
+            QueryPerformanceCounter(&t2);
+            elapsedTime = (t2.QuadPart - t1.QuadPart) * 1000.0 / frequency.QuadPart;
+            ERR("Done! %.5f ms\n", elapsedTime);
 
             return stat;
         }
