@@ -963,6 +963,20 @@ static void get_bitmap_sample_size(InterpolationMode interpolation, WrapMode wra
     rect->Height = bottom - top + 1;
 }
 
+static inline int apply_tiling(int pos, int size, BOOL flip)
+{
+    /* Make sure co-ordinates are positive as it simplifies the math. */
+    if (pos < 0)
+        pos = size * 2 + pos % (2 * size);
+
+    if (flip && (pos / size) % 2 == 1)
+        pos = size - 1 - pos % size;
+    else
+        pos %= size;
+
+    return pos;
+}
+
 /* x and y should actually be INT parameters, but two tests fail with that change. The float values
  * must be passed as a function argument before casting them to int, because passing them as float
  * params apparently forces the compiler to store them in non-extended single floating point
@@ -983,31 +997,8 @@ static __attribute__((noinline)) ARGB sample_bitmap_pixel(GDIPCONST GpRect *src_
     }
     else
     {
-        /* Tiling. Make sure co-ordinates are positive as it simplifies the math. */
-        if (x < 0)
-            x = width*2 + x % (INT)(width * 2);
-        if (y < 0)
-            y = height*2 + y % (INT)(height * 2);
-
-        if (attributes->wrap & WrapModeTileFlipX)
-        {
-            if ((x / width) % 2 == 0)
-                x = x % width;
-            else
-                x = width - 1 - x % width;
-        }
-        else
-            x = x % width;
-
-        if (attributes->wrap & WrapModeTileFlipY)
-        {
-            if ((y / height) % 2 == 0)
-                y = y % height;
-            else
-                y = height - 1 - y % height;
-        }
-        else
-            y = y % height;
+        x = apply_tiling(x, width, attributes->wrap & WrapModeTileFlipX);
+        y = apply_tiling(y, height, attributes->wrap & WrapModeTileFlipY);
     }
 
     if (x < src_rect->X || y < src_rect->Y || x >= src_rect->X + src_rect->Width || y >= src_rect->Y + src_rect->Height)
