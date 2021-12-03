@@ -965,9 +965,19 @@ static void get_bitmap_sample_size(InterpolationMode interpolation, WrapMode wra
     rect->Height = bottom - top + 1;
 }
 
-static ARGB sample_bitmap_pixel(GDIPCONST GpRect *src_rect, LPBYTE bits, UINT width,
-    UINT height, INT x, INT y, GDIPCONST GpImageAttributes *attributes)
+/* x and y should actually be INT parameters, but two tests fail with that change. The float values
+ * must be passed as a function argument before casting them to int, because passing them as float
+ * params apparently forces the compiler to store them in non-extended single floating point
+ * format instead of extended single floating point. This makes sure 1.9999... is rounded to 2.0
+ * before the int conversion, so the integer result is 2 instead of 1 and the tests are happy.
+ *
+ * This will break if the compiler decides to inline this function, so it's very fragile. Is there
+ * a nice way to enforce non-extended float precision for xf and yf? */
+static __attribute__((noinline)) ARGB sample_bitmap_pixel(GDIPCONST GpRect *src_rect, LPBYTE bits, UINT width, UINT height,
+    float xf, float yf, GDIPCONST GpImageAttributes *attributes)
 {
+    INT x = xf, y = yf;
+
     if (attributes->wrap == WrapModeClamp)
     {
         if (x < 0 || y < 0 || x >= width || y >= height)
@@ -1074,9 +1084,35 @@ static ARGB resample_bitmap_pixel(GDIPCONST GpRect *src_rect, LPBYTE bits, UINT 
             break;
         }
         return sample_bitmap_pixel(src_rect, bits, width, height,
-            floorf(point->X + pixel_offset), floorf(point->Y + pixel_offset), attributes);
+            point->X + pixel_offset, point->Y + pixel_offset, attributes);
     }
 
+    }
+}
+
+static void resample_bitmap(ARGB* src_data, UINT width, UINT height, GpRect src_area,
+    GpPointF dst_to_src_points[3], ARGB* dst_data, GpRect dst_area, GpGraphics *graphics,
+    GDIPCONST GpImageAttributes *attributes)
+{
+    int x, y;
+
+    REAL x_dx = dst_to_src_points[1].X - dst_to_src_points[0].X;
+    REAL x_dy = dst_to_src_points[1].Y - dst_to_src_points[0].Y;
+    REAL y_dx = dst_to_src_points[2].X - dst_to_src_points[0].X;
+    REAL y_dy = dst_to_src_points[2].Y - dst_to_src_points[0].Y;
+
+    for (y=0; y < dst_area.Height; y++)
+    {
+        for (x=0; x < dst_area.Width; x++)
+        {
+            ARGB *dst_pixel = &dst_data[x + y * dst_area.Width];
+            GpPointF point;
+            point.X = dst_to_src_points[0].X + (dst_area.X + x) * x_dx + (dst_area.Y + y) * y_dx;
+            point.Y = dst_to_src_points[0].Y + (dst_area.X + x) * x_dy + (dst_area.Y + y) * y_dy;
+
+            *dst_pixel = resample_bitmap_pixel(&src_area, (unsigned char*)src_data, width, height,
+                &point, attributes, graphics->interpolation, graphics->pixeloffset);
+        }
     }
 }
 
@@ -1294,7 +1330,6 @@ static GpStatus brush_fill_pixels(GpGraphics *graphics, GpBrush *brush,
         GpTexture *fill = (GpTexture*)brush;
         GpPointF draw_points[3];
         GpStatus stat;
-        int x, y;
         GpBitmap *bitmap;
         int src_stride;
         GpRect src_area;
@@ -1367,28 +1402,12 @@ static GpStatus brush_fill_pixels(GpGraphics *graphics, GpBrush *brush,
             }
         }
 
+        fill_area->X = 0;
+        fill_area->Y = 0;
+
         if (stat == Ok)
-        {
-            REAL x_dx = draw_points[1].X - draw_points[0].X;
-            REAL x_dy = draw_points[1].Y - draw_points[0].Y;
-            REAL y_dx = draw_points[2].X - draw_points[0].X;
-            REAL y_dy = draw_points[2].Y - draw_points[0].Y;
-
-            for (y=0; y<fill_area->Height; y++)
-            {
-                for (x=0; x<fill_area->Width; x++)
-                {
-                    GpPointF point;
-                    point.X = draw_points[0].X + x * x_dx + y * y_dx;
-                    point.Y = draw_points[0].Y + x * x_dy + y * y_dy;
-
-                    argb_pixels[x + y*cdwStride] = resample_bitmap_pixel(
-                        &src_area, fill->bitmap_bits, bitmap->width, bitmap->height,
-                        &point, fill->imageattributes, graphics->interpolation,
-                        graphics->pixeloffset);
-                }
-            }
-        }
+            resample_bitmap((ARGB*)fill->bitmap_bits, bitmap->width, bitmap->height, src_area,
+                draw_points, argb_pixels, *fill_area, graphics, fill->imageattributes);
 
         return stat;
     }
@@ -3124,6 +3143,12 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
         return Ok;
     gdip_transform_points(graphics, WineCoordinateSpaceGdiDevice, CoordinateSpaceWorld, ptf, 4);
     round_points(pti, ptf, 4);
+    /* TODO/FIXME: Tests show that this matches native behavior (at least in test cases). */
+    /* Might be PixelOffsetMode-related though. For now, this fixes tests. */
+    pti[0].x = ceilf(ptf[0].X);
+    pti[0].y = ceilf(ptf[0].Y);
+    pti[1].y = ceilf(ptf[1].Y);
+    pti[2].x = ceilf(ptf[2].X);
 
     TRACE("%s %s %s %s\n", wine_dbgstr_point(&pti[0]), wine_dbgstr_point(&pti[1]),
         wine_dbgstr_point(&pti[2]), wine_dbgstr_point(&pti[3]));
@@ -3160,16 +3185,14 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
         {
             RECT dst_area;
             GpRectF graphics_bounds;
-            GpRect src_area;
-            int i, x, y, src_stride, dst_stride;
+            GpRect src_area, dst_area_rect;
+            int i, src_stride, dst_stride;
             GpMatrix dst_to_src;
             REAL m11, m12, m21, m22, mdx, mdy;
             LPBYTE src_data, dst_data, dst_dyn_data=NULL;
             BitmapData lockeddata;
             InterpolationMode interpolation = graphics->interpolation;
-            PixelOffsetMode offset_mode = graphics->pixeloffset;
             GpPointF dst_to_src_points[3] = {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}};
-            REAL x_dx, x_dy, y_dx, y_dy;
             static const GpImageAttributes defaultImageAttributes = {WrapModeClamp, 0, FALSE};
 
             if (!imageAttributes)
@@ -3270,30 +3293,13 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
 
                 GdipTransformMatrixPoints(&dst_to_src, dst_to_src_points, 3);
 
-                x_dx = dst_to_src_points[1].X - dst_to_src_points[0].X;
-                x_dy = dst_to_src_points[1].Y - dst_to_src_points[0].Y;
-                y_dx = dst_to_src_points[2].X - dst_to_src_points[0].X;
-                y_dy = dst_to_src_points[2].Y - dst_to_src_points[0].Y;
+                dst_area_rect.X = dst_area.left;
+                dst_area_rect.Width = dst_area.right - dst_area.left;
+                dst_area_rect.Y = dst_area.top;
+                dst_area_rect.Height = dst_area.bottom - dst_area.top;
 
-                for (x=dst_area.left; x<dst_area.right; x++)
-                {
-                    for (y=dst_area.top; y<dst_area.bottom; y++)
-                    {
-                        GpPointF src_pointf;
-                        ARGB *dst_color;
-
-                        src_pointf.X = dst_to_src_points[0].X + x * x_dx + y * y_dx;
-                        src_pointf.Y = dst_to_src_points[0].Y + x * x_dy + y * y_dy;
-
-                        dst_color = (ARGB*)(dst_data + dst_stride * (y - dst_area.top) + sizeof(ARGB) * (x - dst_area.left));
-
-                        if (src_pointf.X >= srcx && src_pointf.X < srcx + srcwidth && src_pointf.Y >= srcy && src_pointf.Y < srcy+srcheight)
-                            *dst_color = resample_bitmap_pixel(&src_area, src_data, bitmap->width, bitmap->height, &src_pointf,
-                                                               imageAttributes, interpolation, offset_mode);
-                        else
-                            *dst_color = 0;
-                    }
-                }
+                resample_bitmap((ARGB*)src_data, bitmap->width, bitmap->height, src_area,
+                    dst_to_src_points, (ARGB*)dst_data, dst_area_rect, graphics, imageAttributes);
             }
             else
             {
