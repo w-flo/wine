@@ -4906,7 +4906,7 @@ static void test_DrawImage_scale(void)
         { 1.5, InterpolationModeBilinear, PixelOffsetModeNone, image_bil_150, 1 },
         { 1.8, InterpolationModeBilinear, PixelOffsetModeNone, image_bil_180, 1, TRUE },
         { 2.0, InterpolationModeBilinear, PixelOffsetModeNone, image_bil_200, 1 },
-        { 2.5, InterpolationModeBilinear, PixelOffsetModeNone, image_bil_250, 1 },
+        { 2.5, InterpolationModeBilinear, PixelOffsetModeNone, image_bil_250, 2 },
     };
     BYTE src_2x1[6] = { 0x80,0x80,0x80, 0xcc,0xcc,0xcc };
     BYTE dst_8x1[24];

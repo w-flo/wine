@@ -618,6 +618,27 @@ static ARGB blend_colors(ARGB start, ARGB end, REAL position)
         (((start & 0xff) * start_a + ((end & 0xff) * end_a)) / final_a);
 }
 
+static ARGB blend_colors_premult(ARGB start, ARGB end, REAL position)
+{
+    INT start_a, end_a, final_a;
+    INT end_weight, start_weight;
+
+    end_weight = gdip_round(position * 0xff);
+    start_weight = end_weight ^ 0xff;
+
+    start_a = ((start >> 24) & 0xff) * start_weight;
+    end_a = ((end >> 24) & 0xff) * end_weight;
+
+    final_a = start_a + end_a;
+
+    if (final_a < 0xff) return 0;
+
+    return (final_a / 0xff) << 24 |
+        ((((start >> 16) & 0xff) * start_weight + (((end >> 16) & 0xff) * end_weight)) / 0xff) << 16 |
+        ((((start >> 8) & 0xff) * start_weight + (((end >> 8) & 0xff) * end_weight)) / 0xff) << 8 |
+        (((start & 0xff) * start_weight + ((end & 0xff) * end_weight)) / 0xff);
+}
+
 static ARGB blend_line_gradient(GpLineGradient* brush, REAL position)
 {
     REAL blendfac;
@@ -977,6 +998,231 @@ static inline int apply_tiling(int pos, int size, BOOL flip)
     return pos;
 }
 
+/* Weights and intermediate color values are stored as integers. A value of "1" translates to the
+ * fraction 1/(2^PRECISION). */
+#define PRECISION 16
+struct sample_point
+{
+    int offset;
+    unsigned int weight;
+};
+
+static __attribute__((noinline)) int calculate_offset(float pos, BOOL tiling, BOOL flip, int src_start, int src_size)
+{
+    int offset = pos + 0.5;
+    if(tiling)
+        return apply_tiling(pos + 0.5, src_size, flip);
+    else if (offset >= src_start && offset < src_start + src_size)
+        return offset;
+    else
+        return -1;
+}
+
+/* Returned pointer must be freed by the caller */
+static struct sample_point* calculate_sampling_bilinear(int src_start, int src_size, int dst_start, int dst_size, REAL base_pos, REAL delta, BOOL tiling, BOOL flip)
+{
+    struct sample_point *points = malloc(sizeof(struct sample_point) * dst_size * 2);
+    int i;
+
+    if (!points)
+        return NULL;
+
+    for (i = 0; i < dst_size; i++)
+    {
+        struct sample_point point1, point2;
+        float pos = base_pos + (i + dst_start) * delta;
+
+        point1.offset = calculate_offset(floorf(pos), tiling, flip, src_start, src_size);
+        point2.offset = calculate_offset(ceilf(pos), tiling, flip, src_start, src_size);;
+
+        point2.weight = (pos - (int)(pos)) * (1 << PRECISION) + 0.5;
+        point1.weight = (1 << PRECISION) - point2.weight;
+
+        points[2 * i] = point1;
+        points[2 * i + 1] = point2;
+    }
+    return points;
+}
+
+/* Returned pointer must be freed by the caller */
+static struct sample_point* calculate_sampling_nearest(int src_start, int src_size, int dst_start, int dst_size, float base_pos, REAL delta, BOOL tiling, BOOL flip)
+{
+    /* TODO/FIXME: gdi+ PixelOffsetMode */
+    struct sample_point *points = malloc(sizeof(struct sample_point) * dst_size);
+    int i;
+
+    if (!points)
+        return NULL;
+
+    for (i = 0; i < dst_size; i++)
+    {
+        struct sample_point point;
+        float pos = base_pos + (i + dst_start) * delta;
+
+        point.offset = calculate_offset(pos, tiling, flip, src_start, src_size);
+        point.weight = (1 << PRECISION);
+        points[i] = point;
+    }
+    return points;
+}
+
+/* Adds given color argb to the a, r, g, b accumulators, weighted by the given weight. */
+static inline void add_weighted_argb(unsigned int weight, ARGB argb, int *a, int *r, int *g, int *b)
+{
+    *a += weight * (argb >> 24);
+    *r += weight * ((argb >> 16) & 0xff);
+    *g += weight * ((argb >> 8) & 0xff);
+    *b += weight * (argb & 0xff);
+}
+
+static inline ARGB make_argb(int a, int r, int g, int b)
+{
+    int one_half = 1 << (PRECISION - 1);
+    return (((a + one_half) >> PRECISION) << 24) |
+        (((r + one_half) >> PRECISION) << 16) |
+        (((g + one_half) >> PRECISION) << 8) |
+        ((b + one_half) >> PRECISION);
+}
+
+static void resample_unrotated_bitmap(ARGB* src_data, GpRect src_area,
+    ARGB* dst_data, GpRect dst_area, float base_x, float base_y, REAL dx, REAL dy,
+    GpGraphics *graphics, GDIPCONST GpImageAttributes *attributes)
+{
+    static int fixme;
+
+    BOOL tiling = attributes->wrap != WrapModeClamp;
+    BOOL flip_x = attributes->wrap & WrapModeTileFlipX;
+    BOOL flip_y = attributes->wrap & WrapModeTileFlipY;
+
+    int samples_per_pixel;
+    struct sample_point *sample_points_horiz = NULL, *sample_points_vert = NULL;
+
+    ARGB *tmp_rows[2] = {NULL, NULL}, *tmp_data = NULL;
+    int tmp_rows_y[2] = {-9, -9}; /* remembers src y coord of rows currently stored in tmp_rows */
+
+    int dst_x, dst_y, sample_x, sample_y;
+
+    /* Fast resampling for unrotated bitmaps: In a first step, calculate coordinates of source
+     * pixels that need to be sampled, separately for the x and y axis. Store offsets along with
+     * their weight. These are later used for fast lookup in the resampling process. */
+
+    switch (graphics->interpolation)
+    {
+    default:
+        if (!fixme++)
+            FIXME("Unimplemented interpolation %i, using bilinear\n", graphics->interpolation);
+        /* fall-through */
+    case InterpolationModeBilinear:
+        samples_per_pixel = 2;
+        sample_points_horiz = calculate_sampling_bilinear(src_area.X, src_area.Width, dst_area.X, dst_area.Width, base_x, dx, tiling, flip_x);
+        sample_points_vert = calculate_sampling_bilinear(src_area.Y, src_area.Height, dst_area.Y, dst_area.Height, base_y, dy, tiling, flip_y);
+        break;
+    case InterpolationModeNearestNeighbor:
+        samples_per_pixel = 1;
+        sample_points_horiz = calculate_sampling_nearest(src_area.X, src_area.Width, dst_area.X, dst_area.Width, base_x, dx, tiling, flip_x);
+        sample_points_vert = calculate_sampling_nearest(src_area.Y, src_area.Height, dst_area.Y, dst_area.Height, base_y, dy, tiling, flip_y);
+        break;
+    }
+
+    /* The resampling process works by resampling a number (1 for nearest neighbor, 2 for bilinear)
+     * of rows horizontally, resulting in row(s) that have the required width dst_area.Width.
+     * These/this "intermediate" row(s) are stored in tmp_data before resampling them in the
+     * vertical direction to create one row for the final dst_data. */
+    tmp_data = malloc(sizeof(ARGB) * dst_area.Width * samples_per_pixel);
+
+    if (!sample_points_horiz || !sample_points_vert || !tmp_data)
+    {
+        ERR("Failed to allocate memory");
+        goto end;
+    }
+
+    for (sample_y = 0; sample_y < samples_per_pixel; sample_y++)
+        tmp_rows[sample_y] = &tmp_data[sample_y * dst_area.Width];
+
+    for (dst_y = 0; dst_y < dst_area.Height; dst_y++)
+    {
+        /* Horizontally resample all source rows needed to calculate the final row dst_y */
+        /* Store all those horizontally resampled rows in tmp_rows */
+        for (sample_y = 0; sample_y < samples_per_pixel; sample_y++)
+        {
+            struct sample_point point_y = sample_points_vert[dst_y * samples_per_pixel + sample_y];
+            int i;
+
+            if (point_y.weight == 0.0)
+                continue;
+
+            /* See if row point_y.offset was already resampled for a previous dst_y */
+            /* This is quite common with bilinear filtering to more than 50% of the src size */
+            for (i = sample_y; i < samples_per_pixel; i++)
+            {
+                if (tmp_rows_y[i] == point_y.offset)
+                {
+                    /* Row is already resampled and stored in tmp_rows[i], re-use it (swap) */
+                    ARGB *tmp_row = tmp_rows[i];
+                    tmp_rows[i] = tmp_rows[sample_y];
+                    tmp_rows[sample_y] = tmp_row;
+                    tmp_rows_y[i] = tmp_rows_y[sample_y];
+                    tmp_rows_y[sample_y] = point_y.offset;
+                    break;
+                }
+            }
+
+            if (tmp_rows_y[sample_y] == point_y.offset)
+                continue;
+
+            /* Row point_y.offset still needs horizontal resampling, so do that now */
+            for (dst_x = 0; dst_x < dst_area.Width; dst_x++)
+            {
+                int a = 0, r = 0, g = 0, b = 0;
+                ARGB* tmp_pixel = &tmp_rows[sample_y][dst_x];
+
+                if (point_y.offset == -1)
+                {
+                    *tmp_pixel = attributes->outside_color;
+                    continue;
+                }
+
+                for (sample_x = 0; sample_x < samples_per_pixel; sample_x++)
+                {
+                    struct sample_point point_x = sample_points_horiz[dst_x * samples_per_pixel + sample_x];
+                    ARGB argb;
+
+                    if (point_x.offset == -1)
+                        argb = attributes->outside_color;
+                    else
+                        argb = src_data[(point_x.offset - src_area.X) + (point_y.offset - src_area.Y) * src_area.Width];
+
+                    add_weighted_argb(point_x.weight, argb, &a, &r, &g, &b);
+                }
+                *tmp_pixel = make_argb(a, r, g, b);
+            }
+            tmp_rows_y[sample_y] = point_y.offset;
+        }
+
+        /* Now vertically resample rows stored in tmp_rows to get the final dst row */
+        for (dst_x = 0; dst_x < dst_area.Width; dst_x++)
+        {
+            int a = 0, r = 0, g = 0, b = 0;
+            ARGB* dst_pixel = &dst_data[dst_area.Width * dst_y + dst_x];
+
+            for (sample_y = 0; sample_y < samples_per_pixel; sample_y++)
+            {
+                struct sample_point point_y = sample_points_vert[dst_y * samples_per_pixel + sample_y];
+                add_weighted_argb(point_y.weight, tmp_rows[sample_y][dst_x], &a, &r, &g, &b);
+            }
+
+            *dst_pixel = make_argb(a, r, g, b);
+        }
+    }
+
+end:
+    free(sample_points_horiz);
+    free(sample_points_vert);
+    free(tmp_data);
+}
+
+#undef PRECISION
+
 /* x and y should actually be INT parameters, but two tests fail with that change. The float values
  * must be passed as a function argument before casting them to int, because passing them as float
  * params apparently forces the compiler to store them in non-extended single floating point
@@ -1012,7 +1258,7 @@ static __attribute__((noinline)) ARGB sample_bitmap_pixel(GDIPCONST GpRect *src_
 
 static ARGB resample_bitmap_pixel(GDIPCONST GpRect *src_rect, LPBYTE bits, UINT width,
     UINT height, GpPointF *point, GDIPCONST GpImageAttributes *attributes,
-    InterpolationMode interpolation, PixelOffsetMode offset_mode)
+    InterpolationMode interpolation, PixelOffsetMode offset_mode, PixelFormat fmt)
 {
     static int fixme;
 
@@ -1051,10 +1297,19 @@ static ARGB resample_bitmap_pixel(GDIPCONST GpRect *src_rect, LPBYTE bits, UINT 
             rightx, bottomy, attributes);
 
         x_offset = point->X - leftxf;
-        top = blend_colors(topleft, topright, x_offset);
-        bottom = blend_colors(bottomleft, bottomright, x_offset);
 
-        return blend_colors(top, bottom, point->Y - topyf);
+        if (fmt == PixelFormat32bppPARGB)
+        {
+            top = blend_colors_premult(topleft, topright, x_offset);
+            bottom = blend_colors_premult(bottomleft, bottomright, x_offset);
+            return blend_colors_premult(top, bottom, point->Y - topyf);
+        }
+        else
+        {
+            top = blend_colors(topleft, topright, x_offset);
+            bottom = blend_colors(bottomleft, bottomright, x_offset);
+            return blend_colors(top, bottom, point->Y - topyf);
+        }
     }
     case InterpolationModeNearestNeighbor:
     {
@@ -1081,7 +1336,7 @@ static ARGB resample_bitmap_pixel(GDIPCONST GpRect *src_rect, LPBYTE bits, UINT 
 
 static void resample_bitmap(ARGB* src_data, UINT width, UINT height, GpRect src_area,
     GpPointF dst_to_src_points[3], ARGB* dst_data, GpRect dst_area, GpGraphics *graphics,
-    GDIPCONST GpImageAttributes *attributes)
+    GDIPCONST GpImageAttributes *attributes, PixelFormat fmt)
 {
     int x, y;
 
@@ -1089,6 +1344,12 @@ static void resample_bitmap(ARGB* src_data, UINT width, UINT height, GpRect src_
     REAL x_dy = dst_to_src_points[1].Y - dst_to_src_points[0].Y;
     REAL y_dx = dst_to_src_points[2].X - dst_to_src_points[0].X;
     REAL y_dy = dst_to_src_points[2].Y - dst_to_src_points[0].Y;
+
+    if (fmt == PixelFormat32bppPARGB && x_dy == 0 && y_dx == 0 && dst_area.Width * dst_area.Height > 100)
+    {
+        resample_unrotated_bitmap(src_data, src_area, dst_data, dst_area, dst_to_src_points[0].X, dst_to_src_points[0].Y, x_dx, y_dy, graphics, attributes);
+        return;
+    }
 
     for (y=0; y < dst_area.Height; y++)
     {
@@ -1100,7 +1361,7 @@ static void resample_bitmap(ARGB* src_data, UINT width, UINT height, GpRect src_
             point.Y = dst_to_src_points[0].Y + (dst_area.X + x) * x_dy + (dst_area.Y + y) * y_dy;
 
             *dst_pixel = resample_bitmap_pixel(&src_area, (unsigned char*)src_data, width, height,
-                &point, attributes, graphics->interpolation, graphics->pixeloffset);
+                &point, attributes, graphics->interpolation, graphics->pixeloffset, fmt);
         }
     }
 }
@@ -1396,7 +1657,7 @@ static GpStatus brush_fill_pixels(GpGraphics *graphics, GpBrush *brush,
 
         if (stat == Ok)
             resample_bitmap((ARGB*)fill->bitmap_bits, bitmap->width, bitmap->height, src_area,
-                draw_points, argb_pixels, *fill_area, graphics, fill->imageattributes);
+                draw_points, argb_pixels, *fill_area, graphics, fill->imageattributes, PixelFormat32bppARGB);
 
         return stat;
     }
@@ -3261,6 +3522,8 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
             lockeddata.Scan0 = src_data;
             if (!do_resampling && bitmap->format == PixelFormat32bppPARGB)
                 lockeddata.PixelFormat = apply_image_attributes(imageAttributes, NULL, 0, 0, 0, ColorAdjustTypeBitmap, bitmap->format);
+            else if (imageAttributes == &defaultImageAttributes)
+                lockeddata.PixelFormat = PixelFormat32bppPARGB;
             else
                 lockeddata.PixelFormat = PixelFormat32bppARGB;
 
@@ -3316,7 +3579,7 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
                 dst_area_rect.Height = dst_area.bottom - dst_area.top;
 
                 resample_bitmap((ARGB*)src_data, bitmap->width, bitmap->height, src_area,
-                    dst_to_src_points, (ARGB*)dst_data, dst_area_rect, graphics, imageAttributes);
+                    dst_to_src_points, (ARGB*)dst_data, dst_area_rect, graphics, imageAttributes, lockeddata.PixelFormat);
             }
             else
             {
