@@ -2542,6 +2542,7 @@ void get_font_hfont(GpGraphics *graphics, GDIPCONST GpFont *font,
     LOGFONTW lfw;
     HFONT unscaled_font;
     TEXTMETRICW textmet;
+    LONG required_width, required_orientation;
 
     if (font->unit == UnitPixel || font->unit == UnitWorld)
         font_height = font->emSize;
@@ -2570,16 +2571,25 @@ void get_font_hfont(GpGraphics *graphics, GDIPCONST GpFont *font,
     SelectObject(hdc, unscaled_font);
     GetTextMetricsW(hdc, &textmet);
 
-    lfw.lfWidth = gdip_round(textmet.tmAveCharWidth * rel_width / rel_height);
-    lfw.lfEscapement = lfw.lfOrientation = gdip_round((angle / M_PI) * 1800.0);
+    required_width = gdip_round(textmet.tmAveCharWidth * rel_width / rel_height);
+    required_orientation = gdip_round((angle / M_PI) * 1800.0);
 
-    *hfont = CreateFontIndirectW(&lfw);
+    if (required_width == textmet.tmAveCharWidth && required_orientation == lfw.lfOrientation)
+        *hfont = unscaled_font;
+    else
+    {
+        /* font needs scaling to match required width, or it needs rotation, so re-create it */
+        DeleteObject(unscaled_font);
+
+        lfw.lfWidth = required_width;
+        lfw.lfEscapement = lfw.lfOrientation = required_orientation;
+        *hfont = CreateFontIndirectW(&lfw);
+    }
 
     if (lfw_return)
         *lfw_return = lfw;
 
     DeleteDC(hdc);
-    DeleteObject(unscaled_font);
 }
 
 GpStatus WINGDIPAPI GdipCreateFromHDC(HDC hdc, GpGraphics **graphics)
