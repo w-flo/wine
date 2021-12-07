@@ -3484,7 +3484,7 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
 
             TRACE("src_area: %d x %d\n", src_area.Width, src_area.Height);
 
-            src_data = calloc(src_area.Width * src_area.Height, sizeof(ARGB));
+            src_data = malloc(src_area.Width * src_area.Height * sizeof(ARGB));
             if (!src_data)
                 return OutOfMemory;
             src_stride = sizeof(ARGB) * src_area.Width;
@@ -3534,11 +3534,10 @@ GpStatus WINGDIPAPI GdipDrawImagePointsRect(GpGraphics *graphics, GpImage *image
 
                 stat = GdipInvertMatrix(&dst_to_src);
                 if (stat != Ok) return stat;
-
                 dst_stride = sizeof(ARGB) * (dst_area.right - dst_area.left);
 
                 /* Transform the bits as needed to the destination. */
-                dst_data = dst_dyn_data = calloc((dst_area.right - dst_area.left) * (dst_area.bottom - dst_area.top), sizeof(ARGB));
+                dst_data = dst_dyn_data = malloc((dst_area.right - dst_area.left) * (dst_area.bottom - dst_area.top) * sizeof(ARGB));
                 if (!dst_data)
                 {
                     free(src_data);
