@@ -1065,20 +1065,48 @@ static GpStatus get_region_hrgn(struct region_element *element, GpGraphics *grap
             return get_path_hrgn(element->elementdata.path, graphics, hrgn);
         case RegionDataRect:
         {
-            GpPath* path;
             GpStatus stat;
             GpRectF* rc = &element->elementdata.rect;
+            GpPointF points[] = {
+                {X: rc->X, Y: rc->Y},
+                {X: rc->X + rc->Width, Y: rc->Y},
+                {X: rc->X, Y: rc->Y + rc->Height},
+                {X: rc->X + rc->Width, Y: rc->Y + rc->Height},
+            };
 
-            stat = GdipCreatePath(FillModeAlternate, &path);
-            if (stat != Ok)
-                return stat;
-            stat = GdipAddPathRectangle(path, rc->X, rc->Y, rc->Width, rc->Height);
+            if (rc->Width <= 0 || rc->Height <= 0)
+            {
+                *hrgn = CreateRectRgn(0, 0, 0, 0);
+                return *hrgn ? Ok : OutOfMemory;
+            }
 
-            if (stat == Ok)
-                stat = get_path_hrgn(path, graphics, hrgn);
+            if (graphics != NULL)
+                gdip_transform_points(graphics, WineCoordinateSpaceGdiDevice, CoordinateSpaceWorld, points, 4);
 
-            GdipDeletePath(path);
+            if (points[0].X == points[2].X && points[1].X == points[3].X && points[0].Y == points[1].Y && points[2].Y == points[3].Y)
+            {
+                /* Still an axis aligned rect after transform, use fast code path */
+                int left = gdip_round(min(points[0].X, points[3].X));
+                int right = gdip_round(max(points[0].X, points[3].X));
+                int top = gdip_round(min(points[0].Y, points[3].Y));
+                int bottom = gdip_round(max(points[0].Y, points[3].Y));
 
+                *hrgn = CreateRectRgn(left, top, right, bottom);
+                stat =  *hrgn ? Ok : OutOfMemory;
+            }
+            else
+            {
+                GpPath* path;
+                stat = GdipCreatePath(FillModeAlternate, &path);
+                if (stat != Ok)
+                    return stat;
+                stat = GdipAddPathRectangle(path, rc->X, rc->Y, rc->Width, rc->Height);
+
+                if (stat == Ok)
+                    stat = get_path_hrgn(path, graphics, hrgn);
+
+                GdipDeletePath(path);
+            }
             return stat;
         }
         case CombineModeIntersect:
