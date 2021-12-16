@@ -452,11 +452,21 @@ void convert_32bppARGB_to_32bppPARGB(UINT width, UINT height,
         BYTE *dst=dst_bits+y*dst_stride;
         for (x=0; x<width; x++)
         {
+            ARGB *dst_color = (ARGB *)dst, *src_color = (ARGB *)src;
             BYTE alpha=src[3];
-            *dst++ = (*src++ * alpha + 127) / 255;
-            *dst++ = (*src++ * alpha + 127) / 255;
-            *dst++ = (*src++ * alpha + 127) / 255;
-            *dst++ = *src++;
+            if (alpha == 0)
+                *dst_color = 0x00000000;
+            else if (alpha == 255)
+                *dst_color = *src_color;
+            else
+            {
+                dst[0] = (src[0] * alpha + 127) / 255;
+                dst[1] = (src[1] * alpha + 127) / 255;
+                dst[2] = (src[2] * alpha + 127) / 255;
+                dst[3] = alpha;
+            }
+            src += 4;
+            dst += 4;
         }
     }
 }
