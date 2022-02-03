@@ -179,18 +179,28 @@ GpStatus WINGDIPAPI GdipCreateFont(GDIPCONST GpFontFamily *fontFamily,
     SelectObject(hdc, hfont);
     otm.otmSize = sizeof(otm);
     ret = GetOutlineTextMetricsW(hdc, otm.otmSize, &otm);
-    DeleteDC(hdc);
-    DeleteObject(hfont);
 
-    if (!ret) return NotTrueTypeFont;
+    if (!ret)
+    {
+        DeleteDC(hdc);
+        DeleteObject(hfont);
+        return NotTrueTypeFont;
+    }
 
     *font = heap_alloc_zero(sizeof(GpFont));
-    if (!*font) return OutOfMemory;
+    if (!*font)
+    {
+        DeleteDC(hdc);
+        DeleteObject(hfont);
+        return OutOfMemory;
+    }
 
     (*font)->unit = unit;
     (*font)->emSize = emSize;
     (*font)->otm = otm;
     GdipCloneFontFamily((GpFontFamily*)fontFamily, &(*font)->family);
+    (*font)->unscaled_hfont = hfont;
+    (*font)->hdc = hdc;
 
     TRACE("<-- %p\n", *font);
 
@@ -220,12 +230,18 @@ GpStatus WINGDIPAPI GdipCreateFontFromLogfontW(HDC hdc,
     ret = GetOutlineTextMetricsW(hdc, otm.otmSize, &otm);
     GetTextFaceW(hdc, LF_FACESIZE, facename);
     SelectObject(hdc, oldfont);
-    DeleteObject(hfont);
 
-    if (!ret) return NotTrueTypeFont;
+    if (!ret) {
+        DeleteObject(hfont);
+        return NotTrueTypeFont;
+    }
 
     *font = heap_alloc_zero(sizeof(GpFont));
-    if (!*font) return OutOfMemory;
+    if (!*font)
+    {
+        DeleteObject(hfont);
+        return OutOfMemory;
+    }
 
     (*font)->unit = UnitWorld;
     (*font)->emSize = otm.otmTextMetrics.tmHeight - otm.otmTextMetrics.tmInternalLeading;
@@ -235,8 +251,13 @@ GpStatus WINGDIPAPI GdipCreateFontFromLogfontW(HDC hdc,
     if (stat != Ok)
     {
         heap_free(*font);
+        DeleteObject(hfont);
         return NotTrueTypeFont;
     }
+
+    (*font)->unscaled_hfont = hfont;
+    (*font)->hdc = CreateCompatibleDC(0);
+    SelectObject((*font)->hdc, hfont);
 
     TRACE("<-- %p\n", *font);
 
@@ -275,6 +296,8 @@ GpStatus WINGDIPAPI GdipDeleteFont(GpFont* font)
         return InvalidParameter;
 
     GdipDeleteFontFamily(font->family);
+    DeleteDC(font->hdc);
+    DeleteObject(font->unscaled_hfont);
     heap_free(font);
 
     return Ok;
@@ -524,11 +547,7 @@ GpStatus WINGDIPAPI GdipCloneFont(GpFont *font, GpFont **cloneFont)
     if(!font || !cloneFont)
         return InvalidParameter;
 
-    *cloneFont = heap_alloc_zero(sizeof(GpFont));
-    if(!*cloneFont)    return OutOfMemory;
-
-    **cloneFont = *font;
-    return Ok;
+    return GdipCreateFont(font->family, font->emSize, get_font_style(font), font->unit, cloneFont);
 }
 
 /*******************************************************************************
