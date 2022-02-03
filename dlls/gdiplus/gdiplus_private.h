@@ -523,6 +523,8 @@ struct GpFont{
     OUTLINETEXTMETRICW otm;
     REAL emSize; /* in font units */
     Unit unit;
+    HFONT unscaled_hfont;
+    HDC hdc; /* to always keep unscaled_hfont selected */
 };
 
 extern const struct GpStringFormat default_drawstring_format;
