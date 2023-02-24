@@ -602,29 +602,36 @@ static HRESULT DirectSoundDevice_DuplicateSoundBuffer(
 
 /*
  * Add secondary buffer to buffer list.
- * Gets exclusive access to buffer for writing.
  */
 HRESULT DirectSoundDevice_AddBuffer(
     DirectSoundDevice * device,
     IDirectSoundBufferImpl * pDSB)
 {
-    IDirectSoundBufferImpl **newbuffers;
     HRESULT hr = DS_OK;
 
     TRACE("(%p, %p)\n", device, pDSB);
 
     AcquireSRWLockExclusive(&device->buffer_list_lock);
 
-    newbuffers = realloc(device->buffers, sizeof(IDirectSoundBufferImpl*) * (device->nrofbuffers + 1));
+    if (device->buffer_capacity < device->nrofbuffers + 1) {
+        IDirectSoundBufferImpl **newbuffers;
+        int newcapacity = (device->buffer_capacity > 0) ? device->buffer_capacity * 2 : 1;
+        newbuffers = realloc(device->buffers, sizeof(IDirectSoundBufferImpl*) * newcapacity);
 
-    if (newbuffers) {
-        device->buffers = newbuffers;
+        if (newbuffers) {
+            TRACE("buffer capacity grown to %d\n", newcapacity);
+            device->buffers = newbuffers;
+            device->buffer_capacity = newcapacity;
+        } else {
+            ERR("out of memory for buffer list! Current buffer capacity is %d\n", device->buffer_capacity);
+            hr = DSERR_OUTOFMEMORY;
+        }
+    }
+
+    if (hr == DS_OK) {
         device->buffers[device->nrofbuffers] = pDSB;
         device->nrofbuffers++;
         TRACE("buffer count is now %d\n", device->nrofbuffers);
-    } else {
-        ERR("out of memory for buffer list! Current buffer count is %d\n", device->nrofbuffers);
-        hr = DSERR_OUTOFMEMORY;
     }
 
     ReleaseSRWLockExclusive(&device->buffer_list_lock);
@@ -634,7 +641,6 @@ HRESULT DirectSoundDevice_AddBuffer(
 
 /*
  * Remove secondary buffer from buffer list.
- * Gets exclusive access to buffer for writing.
  */
 void DirectSoundDevice_RemoveBuffer(DirectSoundDevice * device, IDirectSoundBufferImpl * pDSB)
 {
@@ -648,6 +654,7 @@ void DirectSoundDevice_RemoveBuffer(DirectSoundDevice * device, IDirectSoundBuff
         assert(device->buffers[0] == pDSB);
         free(device->buffers);
         device->buffers = NULL;
+        device->buffer_capacity = 0;
     } else {
         for (i = 0; i < device->nrofbuffers; i++) {
             if (device->buffers[i] == pDSB) {

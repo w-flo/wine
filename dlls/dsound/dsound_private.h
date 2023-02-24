@@ -79,6 +79,7 @@ struct DirectSoundDevice
     LPBYTE                      buffer;
     DWORD                       writelead, buflen, ac_frames, frag_frames, playpos, pad, stopped;
     int                         nrofbuffers;
+    int                         buffer_capacity;
     IDirectSoundBufferImpl**    buffers;
     SRWLOCK                     buffer_list_lock;
     CRITICAL_SECTION            mixlock;
